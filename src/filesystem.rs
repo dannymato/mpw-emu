@@ -1,11 +1,11 @@
-use std::{cell::RefCell, collections::HashMap, path::{PathBuf, Path, Prefix}, io::{Read, Cursor, Write}, fs::File, ffi::OsString, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, path::{PathBuf, Path, Prefix}, io::{Read, Write}, fs::File, ffi::OsString, rc::Rc, unimplemented};
 
 use anyhow::{anyhow, Result};
 use bimap::BiHashMap;
-use binread::{BinRead, BinReaderExt};
+use binread::{BinRead};
 use xattr::FileExt;
 
-use crate::{common::{FourCC, four_cc, lf_to_cr}, macbinary, mac_roman};
+use crate::{common::{FourCC, four_cc, lf_to_cr}, macbinary, mac_roman, apple_double};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fork {
@@ -26,7 +26,9 @@ enum FileMode {
 	// MacBinary III
 	MacBinary,
 	// Use the native info in file system attributes
-	Native
+	Native,
+	// AppleDouble Format
+	AppleDouble,
 }
 
 #[derive(BinRead)]
@@ -120,30 +122,34 @@ impl MacFile {
 		let path = path.to_path_buf();
 
 		// Does this file have native metadata?
-		if xattr::SUPPORTED_PLATFORM {
-			if let Some(metadata) = file.get_xattr("com.apple.FinderInfo")? {
-				// Yes, let's do it
-				let mut cursor = Cursor::new(&metadata);
-				let file_info: FileInfo = cursor.read_be()?;
-				let resource_fork = file.get_xattr("com.apple.ResourceFork")?.unwrap_or_default();
+		// if xattr::SUPPORTED_PLATFORM {
+		// 	trace!("Is supported platform");
+		// 	if let Some(metadata) = file.get_xattr("com.apple.FinderInfo")? {
+		// 		trace!("Found xattr!");
+		// 		// Yes, let's do it
+		// 		let mut cursor = Cursor::new(&metadata);
+		// 		let file_info: FileInfo = cursor.read_be()?;
+		// 		let resource_fork = file.get_xattr("com.apple.ResourceFork")?.unwrap_or_default();
 
-				if file_info.file_type == four_cc(*b"TEXT") {
-					lf_to_cr(&mut data);
-				}
+		// 		if file_info.file_type == four_cc(*b"TEXT") {
+		// 			lf_to_cr(&mut data);
+		// 		}
 
-				return Ok(MacFile {
-					path,
-					mode: FileMode::Native,
-					dirty: false,
-					file_info,
-					data_fork: data,
-					resource_fork,
-				});
-			}
-		}
+		// 		return Ok(MacFile {
+		// 			path,
+		// 			mode: FileMode::Native,
+		// 			dirty: false,
+		// 			file_info,
+		// 			data_fork: data,
+		// 			resource_fork,
+		// 		});
+		// 	}
+		// }
 
+		trace!("Testing for macBinary");
 		// Is this a MacBinary file?
 		if macbinary::probe(&data) {
+			trace!("Is macbinary");
 			let mb = macbinary::unpack(&data)?;
 
 			return Ok(MacFile {
@@ -161,6 +167,37 @@ impl MacFile {
 				data_fork: mb.data,
 				resource_fork: mb.resource
 			});
+		}
+
+		if apple_double::probe(&data) {
+			trace!("Is AppleDouble");
+			let ad = apple_double::unwrap(&data)?;
+
+			// TODO: Should this instead take the data and find the original?
+			// We could check and see if a rsrc file exists
+			let data_path = path.parent()
+				.expect("Could not get parent path")
+				.join(path.file_stem().expect("Could not get file stem"));
+
+			let mut data_file = File::open(data_path)?;
+			let mut data_vec: Vec<u8> = Vec::new();
+			data_file.read_to_end(&mut data_vec)?;
+
+			return Ok(MacFile {
+				path,
+				mode: FileMode::AppleDouble,
+				dirty: false,
+				file_info: FileInfo {
+					file_type: FourCC(ad.file_info.finder_info.type_id),
+					file_creator: FourCC(ad.file_info.finder_info.creator_id),
+					finder_flags: ad.file_info.finder_info.flags,
+					location: ad.file_info.finder_info.location,
+					reserved_field: 0,
+					extended_data: ad.file_info.extended_info,
+				},
+				data_fork: data_vec,
+				resource_fork: ad.resource,
+			})
 		}
 
 		// It's something else entirely, let's just assume text for now
@@ -200,7 +237,8 @@ impl MacFile {
 				if !self.resource_fork.is_empty() {
 					file.set_xattr("com.apple.ResourceFork", &self.resource_fork)?;
 				}
-			}
+			},
+			FileMode::AppleDouble => unimplemented!(),
 		}
 
 		Ok(())

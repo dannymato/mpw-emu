@@ -2,6 +2,7 @@ use std::{rc::Rc, cell::RefCell};
 #[macro_use]
 extern crate log;
 
+mod apple_double;
 mod common;
 mod emulator;
 mod linker;
