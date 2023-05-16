@@ -169,19 +169,9 @@ impl MacFile {
 			});
 		}
 
-		if apple_double::probe(&data) {
+		if let Some((resource, data)) = apple_double::probe(&data, &path) {
 			trace!("Is AppleDouble");
-			let ad = apple_double::unwrap(&data)?;
-
-			// TODO: Should this instead take the data and find the original?
-			// We could check and see if a rsrc file exists
-			let data_path = path.parent()
-				.expect("Could not get parent path")
-				.join(path.file_stem().expect("Could not get file stem"));
-
-			let mut data_file = File::open(data_path)?;
-			let mut data_vec: Vec<u8> = Vec::new();
-			data_file.read_to_end(&mut data_vec)?;
+			let ad = apple_double::unwrap(&resource)?;
 
 			return Ok(MacFile {
 				path,
@@ -195,7 +185,7 @@ impl MacFile {
 					reserved_field: 0,
 					extended_data: ad.file_info.extended_info,
 				},
-				data_fork: data_vec,
+				data_fork: data,
 				resource_fork: ad.resource,
 			})
 		}

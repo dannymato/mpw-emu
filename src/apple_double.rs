@@ -1,11 +1,13 @@
 use binread::{BinRead, BinReaderExt, BinResult};
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
-use std::io;
+use std::{io, fs};
+use std::path::Path;
 
 const APPLE_DOUBLE_MAGIC: u32 = 0x00051607;
 
 #[derive(Debug, FromPrimitive)]
+#[allow(dead_code)]
 #[repr(u32)]
 pub enum EntryType {
     DataFork = 1,
@@ -71,10 +73,73 @@ pub struct File {
     pub resource: Vec<u8>,
 }
 
-// For now assume that we have the appledouble and not the data file
-// Can maybe add to support either file
-pub fn probe(file: &[u8]) -> bool {
-    u32::from_be_bytes(file[0x0..0x4].try_into().unwrap()) == APPLE_DOUBLE_MAGIC
+fn is_apple_double(file: &[u8]) -> bool {
+    if file.len() < 4 {
+        return false;
+    }
+
+    let res = file[0x0..0x4].try_into();
+
+    res.is_ok() && u32::from_be_bytes(res.unwrap()) == APPLE_DOUBLE_MAGIC
+}
+
+pub fn probe<P: AsRef<Path>>(file: &[u8], path: P) -> Option<(Vec<u8>, Vec<u8>)> {
+    if is_apple_double(&file) {
+        return Some((file.to_vec(), find_data_file(path)?));
+    }
+
+    Some((find_resource_file(path)?, file.to_vec()))
+}
+
+fn find_resource_file<P: AsRef<Path>>(path: P) -> Option<Vec<u8>> {
+    let path: &Path = path.as_ref();
+    if let Some(parent) = path.parent() {
+        // Trying original.rsrc
+        let new_path = parent.join(path.with_extension("rsrc"));
+        if new_path.exists() {
+            return read_resource(new_path);
+        }
+
+        // Trying ._original
+        if let Some(file_name) = path.file_name() {
+            if let Some(file_name) = file_name.to_str() {
+                let new_path = parent.join(format!("._{file_name}"));
+                if new_path.exists() {
+                    return read_resource(new_path);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn read_resource<P: AsRef<Path>>(path: P) -> Option<Vec<u8>> {
+    if let Ok(file_contents) = fs::read(path) {
+        if is_apple_double(&file_contents) {
+            return Some(file_contents)
+        }
+    }
+    None
+}
+
+fn find_data_file<P: AsRef<Path>>(path: P) -> Option<Vec<u8>> {
+    let path: &Path = path.as_ref();
+    if let Some(parent) = path.parent() {
+        if let Some(stem) = path.file_stem() {
+            let new_path = parent.join(stem);
+
+            if !new_path.exists() {
+                return None;
+            }
+
+            if let Ok(data_contents) = fs::read(new_path) {
+                return Some(data_contents);
+            }
+        }
+    }
+
+    None
 }
 
 pub fn unwrap(file: &[u8]) -> BinResult<File> {
